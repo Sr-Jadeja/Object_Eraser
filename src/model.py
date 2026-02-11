@@ -2,63 +2,97 @@
 
 import tensorflow as tf
 from tensorflow.keras import layers, models
+from tensorflow.keras.applications import MobileNetV3Small
 
 from src.config import IMG_SIZE, IMG_CHANNELS, NUM_CLASSES, FINAL_ACTIVATION
 
 
-def conv_block(x, filters, kernel_size=3):
-    """Conv2D -> BatchNorm -> ReLU"""
-    x = layers.Conv2D(filters, kernel_size, padding="same")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation("relu")(x)
+def conv_block(x, filters, name):
+    x = layers.Conv2D(filters, 3, padding="same", kernel_initializer="he_normal", name=name + "_conv1")(x)
+    x = layers.BatchNormalization(name=name + "_bn1")(x)
+    x = layers.Activation("relu", name=name + "_act1")(x)
+
+    x = layers.Conv2D(filters, 3, padding="same", kernel_initializer="he_normal", name=name + "_conv2")(x)
+    x = layers.BatchNormalization(name=name + "_bn2")(x)
+    x = layers.Activation("relu", name=name + "_act2")(x)
     return x
 
 
-def upsample_block(x, filters):
-    """Upsample -> two conv blocks"""
-    x = layers.UpSampling2D((2, 2))(x)
-    x = conv_block(x, filters)
-    x = conv_block(x, filters)
-    return x
+def resize_like(x, ref):
+    # Resize x to the spatial size of ref using Keras layer
+    return layers.Resizing(ref.shape[1], ref.shape[2], interpolation="bilinear")(x)
 
 
-def build_model():
-    """
-    MobileNetV3Small encoder + simple U-Net style decoder (no fragile skips)
-    """
+def build_unetpp():
+    inputs = layers.Input((IMG_SIZE, IMG_SIZE, IMG_CHANNELS))
 
-    inputs = layers.Input(shape=(IMG_SIZE, IMG_SIZE, IMG_CHANNELS))
-
-    # Encoder
-    base_model = tf.keras.applications.MobileNetV3Small(
+    # -----------------------------
+    # Encoder: MobileNetV3Small
+    # -----------------------------
+    base_model = MobileNetV3Small(
         input_tensor=inputs,
         include_top=False,
         weights="imagenet"
     )
 
-    encoder_output = base_model.output  # ~8x8 feature map
+    # Stable feature maps from your MobileNetV3 build
+    e1 = base_model.get_layer("re_lu").output           # ~128x128
+    e2 = base_model.get_layer("re_lu_3").output         # ~64x64
+    e3 = base_model.get_layer("re_lu_6").output         # ~32x32
+    e4 = base_model.get_layer("re_lu_12").output        # ~16x16
+    e5 = base_model.get_layer("activation_17").output   # ~8x8
 
-    # Decoder
-    x = conv_block(encoder_output, 512)
+    # -----------------------------
+    # Decoder (Shape-safe, U-Net++ style)
+    # -----------------------------
+    x5 = conv_block(e5, 256, "x5")
 
-    x = upsample_block(x, 256)  # 8 -> 16
-    x = upsample_block(x, 128)  # 16 -> 32
-    x = upsample_block(x, 64)   # 32 -> 64
-    x = upsample_block(x, 32)   # 64 -> 128
-    x = upsample_block(x, 16)   # 128 -> 256
+    x4 = conv_block(
+        layers.Concatenate()([
+            e4,
+            resize_like(x5, e4)
+        ]),
+        256,
+        "x4"
+    )
 
-    # Output layer: 1-channel mask
-    outputs = layers.Conv2D(
-        NUM_CLASSES,
-        kernel_size=1,
-        padding="same",
-        activation=FINAL_ACTIVATION
-    )(x)
+    x3 = conv_block(
+        layers.Concatenate()([
+            e3,
+            resize_like(x4, e3)
+        ]),
+        128,
+        "x3"
+    )
 
-    model = models.Model(inputs, outputs)
+    x2 = conv_block(
+        layers.Concatenate()([
+            e2,
+            resize_like(x3, e2)
+        ]),
+        64,
+        "x2"
+    )
+
+    x1 = conv_block(
+        layers.Concatenate()([
+            e1,
+            resize_like(x2, e1)
+        ]),
+        32,
+        "x1"
+    )
+
+    # Final upsampling to full resolution
+    x0 = layers.Resizing(IMG_SIZE, IMG_SIZE, interpolation="bilinear")(x1)
+
+    outputs = layers.Conv2D(NUM_CLASSES, 1, padding="same", activation=FINAL_ACTIVATION)(x0)
+
+    model = models.Model(inputs, outputs, name="UNetPlusPlus_MobileNetV3_Safe")
+
     return model
 
 
 if __name__ == "__main__":
-    model = build_model()
+    model = build_unetpp()
     model.summary()
