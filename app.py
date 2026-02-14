@@ -41,7 +41,7 @@ def postprocess_mask(pred):
 # ----------------------------
 # UI
 # ----------------------------
-st.title("Human Segmentation System Demo")
+st.title("Human Segmentation System")
 st.write("Upload an image and the model will generate a segmentation mask.")
 
 uploaded_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
